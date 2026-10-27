@@ -5,8 +5,9 @@
  * https://github.com/ShawnPott73/lovelace-framed-panel-card
  */
 
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.0.1";
 const CARD_TYPE = "framed-panel-card";
+const CARD_TYPE_FULL = `custom:${CARD_TYPE}`;
 const EDITOR_TYPE = "framed-panel-card-editor";
 
 const DEFAULTS = {
@@ -32,8 +33,9 @@ function cssLength(value, unit = "px") {
   return trimmed;
 }
 
-function deepMerge(base, extra) {
-  return { ...base, ...extra };
+function normalizeConfig(config = {}) {
+  const next = { ...DEFAULTS, ...config, type: CARD_TYPE_FULL };
+  return next;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -59,69 +61,11 @@ class FramedPanelCard extends HTMLElement {
     return document.createElement(EDITOR_TYPE);
   }
 
-  static getConfigForm() {
-    // Used by HA for the visual editor fields (border options).
-    // Nested card is edited via the custom editor element.
-    return {
-      schema: [
-        {
-          name: "border_width",
-          required: true,
-          default: DEFAULTS.border_width,
-          selector: { number: { min: 0, max: 64, step: 1, mode: "box", unit_of_measurement: "px" } },
-        },
-        {
-          name: "border_color",
-          required: true,
-          default: DEFAULTS.border_color,
-          selector: { text: {} },
-        },
-        {
-          name: "border_radius",
-          required: true,
-          default: DEFAULTS.border_radius,
-          selector: { number: { min: 0, max: 128, step: 1, mode: "box", unit_of_measurement: "px" } },
-        },
-        {
-          name: "padding",
-          required: true,
-          default: DEFAULTS.padding,
-          selector: { number: { min: 0, max: 128, step: 1, mode: "box", unit_of_measurement: "px" } },
-        },
-        {
-          name: "background",
-          default: DEFAULTS.background,
-          selector: { text: {} },
-        },
-      ],
-      computeLabel: (schema) => {
-        const labels = {
-          border_width: "Border thickness",
-          border_color: "Border color",
-          border_radius: "Corner radius",
-          padding: "Padding",
-          background: "Background",
-        };
-        return labels[schema.name];
-      },
-      computeHelper: (schema) => {
-        const helpers = {
-          border_color: "Any CSS color, e.g. #888, rgba(128,128,128,0.2), or var(--divider-color)",
-          background: "Any CSS background, e.g. none, #111, or rgba(0,0,0,0.2)",
-        };
-        return helpers[schema.name];
-      },
-    };
-  }
-
   setConfig(config) {
-    if (!config) {
+    if (!config || typeof config !== "object") {
       throw new Error("Invalid configuration");
     }
-    if (!config.card || typeof config.card !== "object") {
-      throw new Error("You need to define a nested card under `card:`");
-    }
-    this._config = deepMerge(DEFAULTS, config);
+    this._config = normalizeConfig(config);
     this._build();
   }
 
@@ -173,6 +117,11 @@ class FramedPanelCard extends HTMLElement {
         #card {
           width: 100%;
         }
+        .placeholder {
+          opacity: 0.7;
+          font-size: 14px;
+          padding: 8px 4px;
+        }
       </style>
       <ha-card>
         <div id="card"></div>
@@ -196,10 +145,18 @@ class FramedPanelCard extends HTMLElement {
   }
 
   async _createInnerCard() {
-    if (!this._cardHost || !this._config?.card) return;
+    if (!this._cardHost) return;
 
     this._cardHost.innerHTML = "";
     this._innerCard = null;
+
+    if (!this._config?.card || typeof this._config.card !== "object" || !this._config.card.type) {
+      const placeholder = document.createElement("div");
+      placeholder.className = "placeholder";
+      placeholder.textContent = "Pick a nested card in the visual editor.";
+      this._cardHost.appendChild(placeholder);
+      return;
+    }
 
     const helpers = await window.loadCardHelpers();
     const element = helpers.createCardElement(this._config.card);
@@ -228,12 +185,12 @@ customElements.define(CARD_TYPE, FramedPanelCard);
 class FramedPanelCardEditor extends HTMLElement {
   constructor() {
     super();
-    this._config = {};
+    this._config = normalizeConfig(FramedPanelCard.getStubConfig());
     this._built = false;
   }
 
   setConfig(config) {
-    this._config = deepMerge(DEFAULTS, config || {});
+    this._config = normalizeConfig(config || FramedPanelCard.getStubConfig());
     if (!this._built) {
       this._build();
     } else {
@@ -320,13 +277,11 @@ class FramedPanelCardEditor extends HTMLElement {
     };
     this._form.addEventListener("value-changed", (ev) => {
       ev.stopPropagation();
-      const next = {
+      this._fireChanged({
         ...this._config,
         ...ev.detail.value,
         card: this._config.card,
-      };
-      delete next.type;
-      this._fireChanged(next);
+      });
     });
     wrap.appendChild(this._form);
 
@@ -351,7 +306,6 @@ class FramedPanelCardEditor extends HTMLElement {
   }
 
   async _mountStackEditor() {
-    // Reuse HA's vertical-stack editor (card picker + per-card editors).
     let cls = customElements.get("hui-vertical-stack-card");
     if (!cls) {
       const helpers = await window.loadCardHelpers();
@@ -361,7 +315,6 @@ class FramedPanelCardEditor extends HTMLElement {
     }
     this._stackEditor = await cls.getConfigElement();
     this._stackEditor.addEventListener("config-changed", (ev) => {
-      // Ignore intermediate child events; only handle stack-level configs.
       const cfg = ev.detail?.config;
       if (!cfg || !Array.isArray(cfg.cards)) return;
       ev.stopPropagation();
@@ -372,7 +325,6 @@ class FramedPanelCardEditor extends HTMLElement {
       } else {
         delete next.card;
       }
-      delete next.type;
       this._fireChanged(next);
     });
     this._cardSlot.appendChild(this._stackEditor);
@@ -403,9 +355,10 @@ class FramedPanelCardEditor extends HTMLElement {
   }
 
   _fireChanged(config) {
-    const cleaned = { ...config };
-    delete cleaned.type;
-    this._config = deepMerge(DEFAULTS, cleaned);
+    // Always keep the full custom card type — omitting it breaks the editor preview
+    // with "No type provided" / disables the visual editor.
+    const cleaned = normalizeConfig(config);
+    this._config = cleaned;
     this.dispatchEvent(
       new CustomEvent("config-changed", {
         detail: { config: cleaned },
@@ -423,6 +376,7 @@ customElements.define(EDITOR_TYPE, FramedPanelCardEditor);
 /* -------------------------------------------------------------------------- */
 
 window.customCards = window.customCards || [];
+window.customCards = window.customCards.filter((c) => c.type !== CARD_TYPE);
 window.customCards.push({
   type: CARD_TYPE,
   name: "Framed Panel",
