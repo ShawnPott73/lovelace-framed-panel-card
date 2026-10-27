@@ -244,14 +244,12 @@ class FramedPanelCardEditor extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (this._form) this._form.hass = hass;
-    if (this._cardEditor) this._cardEditor.hass = hass;
-    if (this._cardPicker) this._cardPicker.hass = hass;
+    if (this._stackEditor) this._stackEditor.hass = hass;
   }
 
   set lovelace(lovelace) {
     this._lovelace = lovelace;
-    if (this._cardEditor) this._cardEditor.lovelace = lovelace;
-    if (this._cardPicker) this._cardPicker.lovelace = lovelace;
+    if (this._stackEditor) this._stackEditor.lovelace = lovelace;
   }
 
   async _build() {
@@ -261,7 +259,6 @@ class FramedPanelCardEditor extends HTMLElement {
     const wrap = document.createElement("div");
     wrap.style.cssText = "display:flex;flex-direction:column;gap:16px;padding:4px 0;";
 
-    // --- Style options via ha-form ---
     const formTitle = document.createElement("div");
     formTitle.textContent = "Frame style";
     formTitle.style.cssText = "font-weight:600;font-size:14px;";
@@ -327,133 +324,85 @@ class FramedPanelCardEditor extends HTMLElement {
         ...this._config,
         ...ev.detail.value,
         card: this._config.card,
-        type: undefined,
       };
       delete next.type;
       this._fireChanged(next);
     });
     wrap.appendChild(this._form);
 
-    // --- Nested card ---
     const cardTitle = document.createElement("div");
     cardTitle.textContent = "Nested card";
     cardTitle.style.cssText = "font-weight:600;font-size:14px;margin-top:8px;";
     wrap.appendChild(cardTitle);
 
     const cardHint = document.createElement("div");
-    cardHint.textContent = "Pick or edit the card shown inside the frame.";
+    cardHint.textContent =
+      "Add exactly one card below (use a Vertical Stack inside if you need multiple).";
     cardHint.style.cssText = "font-size:12px;opacity:0.7;margin-top:-8px;";
     wrap.appendChild(cardHint);
 
     this._cardSlot = document.createElement("div");
     wrap.appendChild(this._cardSlot);
-
     this.appendChild(wrap);
 
     if (this._hass) this._form.hass = this._hass;
-    await this._ensureCardEditorLoaded();
+    await this._mountStackEditor();
     this._sync();
   }
 
-  async _ensureCardEditorLoaded() {
-    // Preload card picker / card element editor used by core stack editors.
-    try {
+  async _mountStackEditor() {
+    // Reuse HA's vertical-stack editor (card picker + per-card editors).
+    let cls = customElements.get("hui-vertical-stack-card");
+    if (!cls) {
       const helpers = await window.loadCardHelpers();
-      const stack = helpers.createCardElement({ type: "vertical-stack", cards: [] });
-      if (stack?.constructor?.getConfigElement) {
-        await stack.constructor.getConfigElement();
-      }
-    } catch (err) {
-      // Editor still works for style fields; nested picker may need a refresh.
-      console.warn("framed-panel-card: could not preload card editor helpers", err);
+      helpers.createCardElement({ type: "vertical-stack", cards: [] });
+      await customElements.whenDefined("hui-vertical-stack-card");
+      cls = customElements.get("hui-vertical-stack-card");
     }
+    this._stackEditor = await cls.getConfigElement();
+    this._stackEditor.addEventListener("config-changed", (ev) => {
+      // Ignore intermediate child events; only handle stack-level configs.
+      const cfg = ev.detail?.config;
+      if (!cfg || !Array.isArray(cfg.cards)) return;
+      ev.stopPropagation();
+      const nested = cfg.cards[0];
+      const next = { ...this._config };
+      if (nested) {
+        next.card = nested;
+      } else {
+        delete next.card;
+      }
+      delete next.type;
+      this._fireChanged(next);
+    });
+    this._cardSlot.appendChild(this._stackEditor);
+    if (this._hass) this._stackEditor.hass = this._hass;
+    if (this._lovelace) this._stackEditor.lovelace = this._lovelace;
   }
 
   _sync() {
     if (!this._form) return;
 
-    const data = {
+    this._form.data = {
       border_width: this._config.border_width ?? DEFAULTS.border_width,
       border_color: this._config.border_color ?? DEFAULTS.border_color,
       border_radius: this._config.border_radius ?? DEFAULTS.border_radius,
       padding: this._config.padding ?? DEFAULTS.padding,
       background: this._config.background ?? DEFAULTS.background,
     };
-    this._form.data = data;
     if (this._hass) this._form.hass = this._hass;
 
-    this._renderCardEditor();
-  }
-
-  _renderCardEditor() {
-    if (!this._cardSlot) return;
-    this._cardSlot.innerHTML = "";
-    this._cardEditor = null;
-    this._cardPicker = null;
-
-    if (this._config.card) {
-      // Edit existing nested card
-      const editor = document.createElement("hui-card-element-editor");
-      editor.addEventListener("config-changed", (ev) => {
-        ev.stopPropagation();
-        const cardConfig = ev.detail.config;
-        this._fireChanged({ ...this._config, card: cardConfig });
+    if (this._stackEditor) {
+      if (this._hass) this._stackEditor.hass = this._hass;
+      if (this._lovelace) this._stackEditor.lovelace = this._lovelace;
+      this._stackEditor.setConfig({
+        type: "vertical-stack",
+        cards: this._config.card ? [this._config.card] : [],
       });
-      editor.addEventListener("GUImode-changed", (ev) => {
-        ev.stopPropagation();
-      });
-      if (this._hass) editor.hass = this._hass;
-      if (this._lovelace) editor.lovelace = this._lovelace;
-      // value setter used by HA card element editor
-      try {
-        editor.hass = this._hass;
-        editor.lovelace = this._lovelace;
-        editor.setConfig(this._config.card);
-      } catch (err) {
-        console.warn("framed-panel-card: nested card editor setConfig failed", err);
-      }
-      this._cardEditor = editor;
-      this._cardSlot.appendChild(editor);
-
-      const replaceBtn = document.createElement("ha-button");
-      replaceBtn.style.marginTop = "8px";
-      replaceBtn.innerHTML = `<span>Replace nested card</span>`;
-      replaceBtn.addEventListener("click", () => {
-        this._fireChanged({ ...this._config, card: undefined });
-      });
-      // fallback plain button if ha-button unavailable
-      const plain = document.createElement("mwc-button");
-      plain.style.marginTop = "8px";
-      plain.setAttribute("outlined", "");
-      plain.textContent = "Replace nested card";
-      plain.addEventListener("click", () => {
-        const next = { ...this._config };
-        delete next.card;
-        this._fireChanged(next);
-      });
-      this._cardSlot.appendChild(plain);
-    } else {
-      const picker = document.createElement("hui-card-picker");
-      if (this._hass) picker.hass = this._hass;
-      if (this._lovelace) picker.lovelace = this._lovelace;
-      picker.addEventListener("config-changed", (ev) => {
-        ev.stopPropagation();
-        if (!ev.detail?.config) return;
-        this._fireChanged({ ...this._config, card: ev.detail.config });
-      });
-      // Some HA versions use value-changed
-      picker.addEventListener("value-changed", (ev) => {
-        ev.stopPropagation();
-        if (!ev.detail?.value) return;
-        this._fireChanged({ ...this._config, card: ev.detail.value });
-      });
-      this._cardPicker = picker;
-      this._cardSlot.appendChild(picker);
     }
   }
 
   _fireChanged(config) {
-    // Keep type out of stored config detail; HA adds it.
     const cleaned = { ...config };
     delete cleaned.type;
     this._config = deepMerge(DEFAULTS, cleaned);
