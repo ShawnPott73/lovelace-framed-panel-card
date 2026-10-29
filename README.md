@@ -23,11 +23,11 @@ Fully editable in the **visual card editor**: border thickness, color, corner ra
 
 ### HACS (custom repository)
 
-1. HACS → Frontend → ⋮ → **Custom repositories**
-2. Add this repository URL, category **Lovelace**
-3. Install **Framed Panel Card**
-4. Restart Home Assistant (or reload resources)
-5. Add the card from the dashboard UI (**Framed Panel**)
+1. HACS → **Dashboard** → ⋮ → **Custom repositories**
+2. Paste `https://github.com/ShawnPott73/lovelace-framed-panel-card`
+3. Category: **Dashboard**
+4. Download **Framed Panel Card**
+5. Reload the dashboard, then add **Framed Panel** from the card picker
 
 ### Manual
 
